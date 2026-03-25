@@ -1,0 +1,6 @@
+[functions]
+  directory = "netlify/functions"
+
+[functions."download-recording"]
+  # Increase timeout for large recordings
+  timeout = 120

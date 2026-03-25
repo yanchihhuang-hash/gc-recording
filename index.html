@@ -75,19 +75,55 @@ function AudioPlayer(props){
   }
   function dl(){
     setLd(true);setErr("");
-    /* Download via Netlify serverless function proxy.
-       The function fetches both channels server-side (no CORS),
-       merges them into stereo WAV, and returns the merged file. */
-    var fnUrl="/.netlify/functions/download-recording?cid="+encodeURIComponent(cid)+"&rid="+encodeURIComponent(rid)+"&token="+encodeURIComponent(tok)+"&region="+encodeURIComponent(reg);
-    fetch(fnUrl).then(function(r){
-      if(!r.ok)return r.text().then(function(t){throw new Error(t)});
-      return r.blob();
-    }).then(function(blob){
-      var url=URL.createObjectURL(blob);
-      var a=document.createElement("a");a.href=url;a.download="recording_"+cid+".wav";
-      document.body.appendChild(a);a.click();
-      setTimeout(function(){document.body.removeChild(a);URL.revokeObjectURL(url)},2000);
-      setLd(false);
+    /* Step 1: Get channel URLs via Function (bypasses CORS for metadata) */
+    var metaUrl="/.netlify/functions/download-recording?cid="+encodeURIComponent(cid)+"&rid="+encodeURIComponent(rid)+"&token="+encodeURIComponent(tok)+"&region="+encodeURIComponent(reg);
+    fetch(metaUrl).then(function(r){return r.json()}).then(function(data){
+      if(!data.urls||data.urls.length===0)throw new Error("No audio URLs");
+      /* Step 2: Download each channel via Function proxy (bypasses CORS for S3) */
+      return Promise.all(data.urls.map(function(u){
+        return fetch("/.netlify/functions/download-recording?url="+encodeURIComponent(u)).then(function(r){
+          if(!r.ok)throw new Error("Channel download failed");
+          return r.arrayBuffer();
+        });
+      }));
+    }).then(function(bufs){
+      if(bufs.length===1){
+        /* Single channel - download directly */
+        var blob=new Blob([bufs[0]],{type:"audio/wav"});
+        var url=URL.createObjectURL(blob);
+        var a=document.createElement("a");a.href=url;a.download="recording_"+cid+".wav";
+        document.body.appendChild(a);a.click();setTimeout(function(){document.body.removeChild(a);URL.revokeObjectURL(url)},2000);
+        setLd(false);return;
+      }
+      /* Step 3: Merge two channels into stereo WAV in browser */
+      var actx=new(window.AudioContext||window.webkitAudioContext)();
+      return Promise.all(bufs.map(function(b){return actx.decodeAudioData(b.slice(0))})).then(function(decoded){
+        var len=Math.max(decoded[0].length,decoded[1].length);
+        var rate=decoded[0].sampleRate;
+        var nCh=2,bps=16;
+        var dataSize=len*nCh*(bps/8);
+        var buf=new ArrayBuffer(44+dataSize);
+        var dv=new DataView(buf);
+        function ws(o,s){for(var i=0;i<s.length;i++)dv.setUint8(o+i,s.charCodeAt(i))}
+        ws(0,"RIFF");dv.setUint32(4,36+dataSize,true);ws(8,"WAVE");ws(12,"fmt ");
+        dv.setUint32(16,16,true);dv.setUint16(20,1,true);dv.setUint16(22,nCh,true);
+        dv.setUint32(24,rate,true);dv.setUint32(28,rate*nCh*(bps/8),true);
+        dv.setUint16(32,nCh*(bps/8),true);dv.setUint16(34,bps,true);
+        ws(36,"data");dv.setUint32(40,dataSize,true);
+        var ch0=decoded[0].getChannelData(0),ch1=decoded[1].getChannelData(0);
+        var off=44;
+        for(var i=0;i<len;i++){
+          var s0=i<ch0.length?ch0[i]:0;var s1=i<ch1.length?ch1[i]:0;
+          dv.setInt16(off,Math.max(-32768,Math.min(32767,s0<0?s0*32768:s0*32767)),true);off+=2;
+          dv.setInt16(off,Math.max(-32768,Math.min(32767,s1<0?s1*32768:s1*32767)),true);off+=2;
+        }
+        var blob=new Blob([buf],{type:"audio/wav"});
+        var url=URL.createObjectURL(blob);
+        var a=document.createElement("a");a.href=url;a.download="recording_"+cid+".wav";
+        document.body.appendChild(a);a.click();
+        setTimeout(function(){document.body.removeChild(a);URL.revokeObjectURL(url)},2000);
+        actx.close();setLd(false);
+      });
     }).catch(function(e){setErr(e.message);setLd(false)});
   }
   return h("div",{className:"ar"},h("audio",{ref:a0,onTimeUpdate:function(){if(a0.current)setProg(a0.current.currentTime)},onLoadedMetadata:function(){if(a0.current)setDur(a0.current.duration)},onEnded:function(){setP(false);if(a1.current)a1.current.pause()}}),h("audio",{ref:a1}),h("button",{onClick:toggle,style:S.ib,title:"Play"},ld?h("span",{style:spn}):Ico(playing?"pause":"play")),dur>0?h("div",{style:{flex:1,minWidth:60,height:4,background:"#e2e8f0",borderRadius:2,overflow:"hidden"}},h("div",{style:{width:(prog/dur*100)+"%",height:"100%",background:"#3b82f6",borderRadius:2,transition:"width .2s"}})):null,h("button",{onClick:dl,style:S.ib,title:"Download"},ld?h("span",{style:spn}):Ico("dl")),err?h("span",{style:{color:"#ef4444",fontSize:11,marginLeft:4}},err):null);
